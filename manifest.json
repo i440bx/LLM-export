@@ -1,0 +1,51 @@
+{
+  "manifest_version": 2,
+  "name": "LLM Export",
+  "version": "9.3.0.2",
+  "description": "Export your ChatGPT conversations to PDF, HTML or Markdown. Processing happens locally in your browser; no conversation data is sent to third parties.",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "storage",
+    "https://chatgpt.com/*"
+  ],
+  "browser_action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "lib/highlight/highlight.min.js",
+        "lib/purify.min.js",
+        "content/content.js"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    "content/helper.js",
+    "lib/tex-chtml.js"
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "@llm-export.i440bx",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  }
+}

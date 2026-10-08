@@ -1,0 +1,12 @@
+# Local archive / old files
+old_data/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor / temp files
+*.swp
+*.swo
+*~
+saved_data/

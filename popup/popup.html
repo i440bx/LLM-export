@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>LLM Export</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <button class="theme-toggle" id="themeToggle" title="Toggle dark mode">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="9" y1="18" x2="15" y2="18"/>
+        <line x1="10" y1="22" x2="14" y2="22"/>
+        <path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"/>
+      </svg>
+    </button>
+    <h1>LLM Export</h1>
+    <p class="tagline">Export conversations to PDF, HTML or Markdown</p>
+  </div>
+
+  <div class="main" id="main">
+    <div class="field">
+      <label for="formatSelect">Export format</label>
+      <select id="formatSelect">
+        <option value="html">HTML</option>
+        <option value="pdf">PDF</option>
+        <option value="markdown">Markdown</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="themeSelect">Theme</label>
+      <select id="themeSelect">
+        <option value="auto">Auto (match ChatGPT)</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </div>
+    <div class="field toggle-row">
+      <span class="toggle-label-text">Include images</span>
+      <label class="toggle">
+        <input type="checkbox" id="includeImages">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="field toggle-row">
+      <span class="toggle-label-text">LaTeX support <span class="tag-experimental">experimental</span></span>
+      <label class="toggle">
+        <input type="checkbox" id="latexSupport">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="field toggle-row">
+      <span class="toggle-label-text">Ask for a title <span class="tag-experimental">private tabs</span></span>
+      <label class="toggle">
+        <input type="checkbox" id="askTitle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <button id="convertBtn">
+      <svg class="btn-spinner" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <path d="M12 2a10 10 0 0 1 10 10"/>
+      </svg>
+      <span class="btn-label">Export Conversation</span>
+    </button>
+  </div>
+
+  <div class="not-on-chatgpt" id="notOnChatgpt">
+    <span class="arrow">↗</span>
+    <p>Open a ChatGPT conversation to export it.</p>
+    <a href="https://chatgpt.com" target="_blank">Go to ChatGPT</a>
+  </div>
+
+  <div class="modal-overlay" id="domNotice">
+    <div class="modal">
+      <p class="modal-title">The page will scroll automatically</p>
+      <p class="modal-text">
+        You're not signed in, so this conversation is read directly from the page.
+        The screen will scroll by itself, first up, then down. That's the
+        extension doing its job, nothing's wrong.
+        Please don't touch the screen until the export finishes.
+      </p>
+      <div class="modal-actions">
+        <button id="domNoticeCancel" class="modal-btn secondary">No</button>
+        <button id="domNoticeOk" class="modal-btn primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="formatLockNotice">
+    <div class="modal">
+      <p class="modal-title">Sign in required</p>
+      <p class="modal-text">
+        Markdown export reads the raw text straight from ChatGPT's API, so it's
+        only available when you're signed in to ChatGPT.
+      </p>
+      <div class="modal-actions">
+        <button id="formatLockNoticeOk" class="modal-btn primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

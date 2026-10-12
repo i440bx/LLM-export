@@ -182,15 +182,28 @@ function linearizePaginated(rawMessages, includeImages) {
     if (role === 'assistant' && msg.recipient && msg.recipient !== 'all') continue;
 
     const segments = [];
-    for (const part of (msg.content?.parts ?? [])) {
-      if (typeof part === 'string') {
-        const text = part
-          .replace(/\u{E0000}[\u{E0000}-\u{E007F}]*/gu, '')
-          .replace(/citeturn\d+\w*/g, '')
-          .trim();
-        if (text) segments.push({ type: 'text', content: text });
-      } else if (includeImages && part?.content_type === 'image_asset_pointer' && part?.asset_pointer) {
-        segments.push({ type: 'image', fileId: part.asset_pointer.split('://')[1] });
+    const contentType = msg.content?.content_type;
+
+    if (role === 'assistant' && contentType === 'thoughts') {
+      // Keep only the user-visible reasoning summaries. Deliberately do not
+      // export raw thought content.
+      for (const thought of (msg.content?.thoughts ?? [])) {
+        const summary = typeof thought?.summary === 'string'
+          ? thought.summary.trim()
+          : '';
+        if (summary) segments.push({ type: 'text', content: summary });
+      }
+    } else {
+      for (const part of (msg.content?.parts ?? [])) {
+        if (typeof part === 'string') {
+          const text = part
+            .replace(/\u{E0000}[\u{E0000}-\u{E007F}]*/gu, '')
+            .replace(/citeturn\d+\w*/g, '')
+            .trim();
+          if (text) segments.push({ type: 'text', content: text });
+        } else if (includeImages && part?.content_type === 'image_asset_pointer' && part?.asset_pointer) {
+          segments.push({ type: 'image', fileId: part.asset_pointer.split('://')[1] });
+        }
       }
     }
 
@@ -202,7 +215,12 @@ function linearizePaginated(rawMessages, includeImages) {
       citeMap[ref.matched_text] = ref.items?.length ? ref.items : [ref];
     }
 
-    messages.push({ role, segments, citeMap });
+    messages.push({
+      role,
+      segments,
+      citeMap,
+      kind: contentType === 'thoughts' ? 'reasoning' : undefined
+    });
   }
 
   return messages;
@@ -262,11 +280,20 @@ async function exportMarkdown(robust = false) {
 
   const label = { user: 'User', assistant: 'Assistant' };
   const md = messages
-    .map(({ role, segments, citeMap }) => {
+    .map(({ role, segments, citeMap, kind }) => {
       const text = segments
         .filter(s => s.type === 'text')
         .map(s => mdResolveSpans(s.content, citeMap ?? {}))
         .join('\n\n');
+
+      if (kind === 'reasoning') {
+        const quoted = text
+          .split('\n')
+          .map(line => `> ${line}`)
+          .join('\n');
+        return `### Reasoning summary\n\n${quoted}`;
+      }
+
       return `## ${label[role] || role}\n\n${text}`;
     })
     .join('\n\n');
@@ -753,6 +780,9 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
     const bg       = theme === 'dark' ? '#212121' : '#FFF';
     const fg       = theme === 'dark' ? '#FFF'    : '#000';
     const userBg   = theme === 'dark' ? '#303030' : '#f4f4f4';
+    const reasoningBg = theme === 'dark' ? 'rgba(16,163,127,0.14)' : '#eefaf6';
+    const reasoningBorder = '#10a37f';
+    const reasoningLabel = theme === 'dark' ? '#7de2c6' : '#08735a';
     const codeBg   = theme === 'dark' ? '#303030' : '#ececec';
     const tableBdr = theme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)';
     const bqBdr    = theme === 'dark' ? 'rgba(255,255,255,0.3)'  : 'rgba(0,0,0,0.2)';
@@ -779,6 +809,7 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
   <style>
     :root {
       --bg: ${bg}; --fg: ${fg}; --user-bg: ${userBg};
+      --reasoning-bg: ${reasoningBg}; --reasoning-border: ${reasoningBorder}; --reasoning-label: ${reasoningLabel};
       --code-bg: ${codeBg}; --table-bdr: ${tableBdr};
       --bq-bdr: ${bqBdr}; --cb-bg: ${cbBg}; --cb-bdr: ${cbBorder};
       --nav-dash: ${navDash}; --nav-dash-hov: ${navDashHov}; --nav-dash-act: ${navDashAct};
@@ -808,6 +839,20 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
     .message { margin-bottom: 20px; padding: 10px 20px; border-radius: 18px; width: fit-content; clear: both; overflow: hidden; }
     .user-message { float: right; max-width: 80%; background: var(--user-bg); }
     .assistant-message { float: left; max-width: 95%; }
+    .reasoning-message {
+      float: left; max-width: 95%;
+      background: var(--reasoning-bg);
+      border-left: 3px solid var(--reasoning-border);
+      border-radius: 12px;
+    }
+    .reasoning-label {
+      color: var(--reasoning-label);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
     .content { user-select: text; overflow-wrap: break-word; }
     .content img { max-height: 220px; width: auto; border-radius: 8px; margin: 8px 0; display: block; cursor: zoom-in; transition: opacity 0.15s; }
     .content img:hover { opacity: 0.85; }
@@ -938,11 +983,14 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
 `;
 
     let userIdx = 0;
-    for (const { role, segments, citeMap } of messages) {
+    for (const { role, segments, citeMap, kind } of messages) {
       _citeMap = citeMap ?? {};
 
       const isUser = role === 'user';
-      const cls = isUser ? 'user-message' : 'assistant-message';
+      const isReasoning = kind === 'reasoning';
+      const cls = isUser
+        ? 'user-message'
+        : (isReasoning ? 'reasoning-message' : 'assistant-message');
       let content = '';
       for (const seg of segments) {
         if (seg.type === 'text') {
@@ -956,7 +1004,10 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
       }
 
       const idAttr = isUser ? ` id="user-msg-${userIdx++}"` : '';
-      html += `    <div class="message ${cls}"${idAttr}><div class="content" dir="auto">${content}</div></div>\n`;
+      const reasoningHeader = isReasoning
+        ? '<div class="reasoning-label">Reasoning summary</div>'
+        : '';
+      html += `    <div class="message ${cls}"${idAttr}>${reasoningHeader}<div class="content" dir="auto">${content}</div></div>\n`;
     }
 
     const viewerScript = format === 'pdf' ? '' : `  <script>

@@ -1,4 +1,5 @@
 const exportButton    = document.getElementById('convertBtn');
+const robustButton    = document.getElementById('robustBtn');
 const formatSelect    = document.getElementById('formatSelect');
 const themeSelect     = document.getElementById('themeSelect');
 const includeImages   = document.getElementById('includeImages');
@@ -94,6 +95,10 @@ let preLockFormat = null;
 
 function setFormatLocked(locked) {
   markdownLocked = locked;
+  robustButton.disabled = locked;
+  robustButton.title = locked
+    ? 'Robust export requires a signed-in ChatGPT session'
+    : 'Paged backend export for very long conversations';
   if (locked) {
     if (formatSelect.value === 'markdown') {
       preLockFormat = 'markdown';
@@ -171,6 +176,37 @@ exportButton.addEventListener('click', () => {
     };
 
     ensureContentScript(tab, afterInjected);
+  });
+});
+
+robustButton.addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs[0];
+    const msg = {
+      action: 'convert_to_html_robust',
+      format: formatSelect.value,
+      theme: themeSelect.value,
+      includeImages: includeImages.checked,
+      latexSupport: latexSupport.checked,
+      askTitle: askTitle.checked
+    };
+
+    robustButton.classList.add('loading');
+    chrome.tabs.sendMessage(tab.id, msg, (response) => {
+      robustButton.classList.remove('loading');
+
+      if (chrome.runtime.lastError) {
+        alert(`Robust export failed: ${chrome.runtime.lastError.message}`);
+        return;
+      }
+      if (response?.status === 'error') {
+        alert(`Robust export failed: ${response.error || 'Unknown error'}`);
+        return;
+      }
+      if (response?.status === 'print') {
+        chrome.tabs.create({ url: chrome.runtime.getURL('print/print.html') });
+      }
+    });
   });
 });
 

@@ -412,3 +412,73 @@ body.light .toggle-label-text { color: #888; }
 body.light .slider { background: #ddd; }
 body.light .not-on-chatgpt { border-bottom-color: #f0f0f0; }
 body.light .not-on-chatgpt p { color: #555; }
+
+
+/* Robust paged backend export */
+button#robustBtn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px;
+  background: transparent;
+  color: #0a7d62;
+  border: 1px solid #10a37f;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, transform 0.1s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+button#robustBtn:hover {
+  background: rgba(16, 163, 127, 0.08);
+}
+
+button#robustBtn:active {
+  transform: scale(0.98);
+}
+
+button#robustBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button#robustBtn.loading {
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+button#robustBtn.loading .btn-spinner {
+  display: block;
+}
+
+.robust-hint {
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: #888;
+  text-align: center;
+}
+
+body.dark button#robustBtn {
+  color: #7de2c6;
+  border-color: #10a37f;
+}
+
+body.dark button#robustBtn:hover {
+  background: rgba(16, 163, 127, 0.14);
+}
+
+@media (prefers-color-scheme: dark) {
+  body:not(.light) button#robustBtn {
+    color: #7de2c6;
+    border-color: #10a37f;
+  }
+  body:not(.light) button#robustBtn:hover {
+    background: rgba(16, 163, 127, 0.14);
+  }
+}

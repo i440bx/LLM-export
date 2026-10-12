@@ -8,12 +8,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ status: 'ok' });
     return;
   }
-  if (request.action === 'convert_to_html') {
+  if (request.action === 'convert_to_html' || request.action === 'convert_to_html_robust') {
+    const robust = request.action === 'convert_to_html_robust';
     const run = request.format === 'markdown'
-      ? exportMarkdown()
-      : convertToHTML(request.format, request.theme, request.includeImages, request.latexSupport, request.askTitle);
+      ? exportMarkdown(robust)
+      : convertToHTML(
+          request.format,
+          request.theme,
+          request.includeImages,
+          request.latexSupport,
+          request.askTitle,
+          robust
+        );
     run.then((result) => sendResponse({ status: result ?? 'done' }))
-      .catch(() => sendResponse({ status: 'done' }));
+      .catch((err) => sendResponse({ status: 'error', error: err?.message || String(err) }));
     return true;
   }
   if (request.action === 'check_dom_fallback') {
@@ -57,6 +65,43 @@ function fetchConversation(convId, token, includeImages) {
     window.addEventListener('message', handler);
     window.postMessage(
       { source: 'chatgpt-export-ext', type: 'fetch_conversation', convId, token, requestId, includeImages },
+      'https://chatgpt.com'
+    );
+  });
+}
+
+function fetchConversationPaginated(convId, token, includeImages) {
+  return new Promise((resolve, reject) => {
+    const requestId = crypto.randomUUID();
+
+    const handler = (event) => {
+      if (event.data?.source !== 'chatgpt-export-page') return;
+      if (event.data?.requestId !== requestId) return;
+      window.removeEventListener('message', handler);
+      clearTimeout(timer);
+      if (event.data.error) {
+        reject(new Error(event.data.error));
+      } else {
+        resolve({ data: event.data.data, images: event.data.images ?? {} });
+      }
+    };
+
+    // Very long conversations can require dozens of paginated requests.
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', handler);
+      reject(new Error('Robust export timed out'));
+    }, 10 * 60 * 1000);
+
+    window.addEventListener('message', handler);
+    window.postMessage(
+      {
+        source: 'chatgpt-export-ext',
+        type: 'fetch_conversation_paginated',
+        convId,
+        token,
+        requestId,
+        includeImages
+      },
       'https://chatgpt.com'
     );
   });
@@ -123,6 +168,46 @@ function linearize(mapping, includeImages, currentNode) {
   return messages;
 }
 
+function linearizePaginated(rawMessages, includeImages) {
+  const messages = [];
+
+  for (const msg of (rawMessages ?? [])) {
+    if (!msg || msg.metadata?.is_visually_hidden_from_conversation) continue;
+
+    const role = msg.author?.role;
+    if (role !== 'user' && role !== 'assistant') continue;
+
+    // Tool invocations are encoded as assistant messages addressed to tools.
+    // Only keep messages that are actually addressed to the conversation.
+    if (role === 'assistant' && msg.recipient && msg.recipient !== 'all') continue;
+
+    const segments = [];
+    for (const part of (msg.content?.parts ?? [])) {
+      if (typeof part === 'string') {
+        const text = part
+          .replace(/\u{E0000}[\u{E0000}-\u{E007F}]*/gu, '')
+          .replace(/citeturn\d+\w*/g, '')
+          .trim();
+        if (text) segments.push({ type: 'text', content: text });
+      } else if (includeImages && part?.content_type === 'image_asset_pointer' && part?.asset_pointer) {
+        segments.push({ type: 'image', fileId: part.asset_pointer.split('://')[1] });
+      }
+    }
+
+    if (!segments.length) continue;
+
+    const citeMap = {};
+    for (const ref of (msg.metadata?.content_references ?? [])) {
+      if (!ref.matched_text) continue;
+      citeMap[ref.matched_text] = ref.items?.length ? ref.items : [ref];
+    }
+
+    messages.push({ role, segments, citeMap });
+  }
+
+  return messages;
+}
+
 function mdResolveSpans(text, citeMap) {
   text = text.replace(/\uE200url\uE202([^\uE202\uE201]+)\uE202([^\uE201]+)\uE201/g,
     (_, label, href) => `[${label.trim()}](${href.trim()})`);
@@ -159,7 +244,7 @@ function mdResolveSpans(text, citeMap) {
     .replace(/citeturn\d+\w*/g, '');
 }
 
-async function exportMarkdown() {
+async function exportMarkdown(robust = false) {
   const token = getAccessToken();
   const convId = getConversationId();
   if (!token || !convId) {
@@ -167,8 +252,12 @@ async function exportMarkdown() {
     return;
   }
 
-  const result = await fetchConversation(convId, token, false);
-  const messages = linearize(result.data.mapping, false, result.data.current_node);
+  const result = robust
+    ? await fetchConversationPaginated(convId, token, false)
+    : await fetchConversation(convId, token, false);
+  const messages = robust
+    ? linearizePaginated(result.data.messages, false)
+    : linearize(result.data.mapping, false, result.data.current_node);
   if (!messages.length) throw new Error('No messages found.');
 
   const label = { user: 'User', assistant: 'Assistant' };
@@ -612,7 +701,7 @@ async function collectFromDOM(includeImages = false) {
   return messages;
 }
 
-async function convertToHTML(format = 'html', selectedTheme = 'auto', includeImages = false, latexSupport = false, askTitle = false) {
+async function convertToHTML(format = 'html', selectedTheme = 'auto', includeImages = false, latexSupport = false, askTitle = false, robust = false) {
   try {
     let mathJaxScript = '';
     if (latexSupport && format !== 'pdf') {
@@ -641,10 +730,15 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
 
     let messages, images = {};
     if (!usesDom) {
-      const result = await fetchConversation(convId, token, includeImages);
+      const result = robust
+        ? await fetchConversationPaginated(convId, token, includeImages)
+        : await fetchConversation(convId, token, includeImages);
       images = result.images;
-      messages = linearize(result.data.mapping, includeImages, result.data.current_node);
+      messages = robust
+        ? linearizePaginated(result.data.messages, includeImages)
+        : linearize(result.data.mapping, includeImages, result.data.current_node);
     } else {
+      if (robust) throw new Error('Robust export requires a signed-in ChatGPT session.');
       messages = await collectFromDOM(includeImages);
     }
     if (!messages.length) throw new Error('No messages found.');

@@ -70,7 +70,11 @@
       </svg>
       <span class="btn-label">Robust Export</span>
     </button>
-    <p class="robust-hint">For very long chats when the normal export fails with API 500 / timeout.</p>
+    <p class="robust-hint">Paged backend export, supplemented by visible browser-only messages.</p>
+    <button id="emergencyBtn" title="Save the currently visible conversation DOM to a local JSON file">
+      Save Frontend Snapshot (.json)
+    </button>
+    <p class="robust-hint">Emergency backup without backend access. Save before refreshing a blocked chat.</p>
   </div>
 
   <div class="not-on-chatgpt" id="notOnChatgpt">

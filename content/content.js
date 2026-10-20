@@ -5,30 +5,203 @@ _s.remove();
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'ping') {
-    sendResponse({ status: 'ok' });
+    sendResponse({ status: 'ok', emergencyFrontend: true });
     return;
   }
   if (request.action === 'convert_to_html' || request.action === 'convert_to_html_robust') {
     const robust = request.action === 'convert_to_html_robust';
+    // Capture synchronously, before a slow backend request or a DOM update.
+    const frontendSnapshot = captureEmergencyFrontendMessages();
     const run = request.format === 'markdown'
-      ? exportMarkdown(robust)
+      ? exportMarkdown(robust, frontendSnapshot)
       : convertToHTML(
           request.format,
           request.theme,
           request.includeImages,
           request.latexSupport,
           request.askTitle,
-          robust
+          robust,
+          frontendSnapshot
         );
     run.then((result) => sendResponse({ status: result ?? 'done' }))
       .catch((err) => sendResponse({ status: 'error', error: err?.message || String(err) }));
     return true;
+  }
+  if (request.action === 'save_frontend_snapshot') {
+    try {
+      saveEmergencyFrontendSnapshot();
+      sendResponse({ status: 'done' });
+    } catch (err) {
+      sendResponse({ status: 'error', error: err?.message || String(err) });
+    }
+    return;
   }
   if (request.action === 'check_dom_fallback') {
     sendResponse({ usesDom: !(getAccessToken() && getConversationId()) });
     return;
   }
 });
+
+// Emergency frontend recovery (2026): UI-only messages can be missing from
+// both conversation API endpoints. Capture only currently mounted DOM turns.
+// ChatGPT virtualizes old turns; this is NOT a complete conversation export.
+function captureEmergencyFrontendMessages() {
+  const result = [];
+  const seen = new Set();
+
+  for (const unit of document.querySelectorAll('[data-chatgpt-search-message-ids]')) {
+    const rawIds = unit.getAttribute('data-chatgpt-search-message-ids') || '';
+    const firstId = rawIds.trim().split(/\s+/)[0];
+    if (!firstId) continue;
+
+    const bubble = unit.querySelector('[data-user-message-bubble="true"]');
+    const assistant = unit.querySelector('[data-markdown-text-style="assistant-message"]');
+    const role = bubble ? 'user' : (assistant ? 'assistant' : null);
+    if (!role) continue;
+
+    const view = bubble || assistant;
+    const id = role === 'assistant'
+      ? (view.querySelector('[data-dil-source-message-id]')?.getAttribute('data-dil-source-message-id')
+          || view.querySelector('[data-dil-message-id]')?.getAttribute('data-dil-message-id')
+          || firstId)
+      : firstId;
+    if (seen.has(id)) continue;
+    seen.add(id);
+
+    // The text is captured independently of the HTML, so Markdown remains
+    // useful even if ChatGPT changes the markup again.
+    const text = (view.innerText || view.textContent || '').trim();
+    if (!text) continue;
+
+    let html;
+    if (role === 'user') {
+      html = `<p>${escapeFrontendHtml(text).replace(/\n/g, '<br>')}</p>`;
+    } else {
+      html = emergencySemanticHtml(view);
+      if (!html) html = `<p>${escapeFrontendHtml(text).replace(/\n/g, '<br>')}</p>`;
+    }
+
+    result.push({ id, role, text, html });
+  }
+  return result;
+}
+
+function escapeFrontendHtml(text) {
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function emergencySemanticHtml(view) {
+  const clone = view.cloneNode(true);
+
+  // CodeMirror editor blocks are interactive UI, not semantic <pre> tags.
+  // Replace each with portable HTML before stripping interface elements.
+  for (const box of clone.querySelectorAll('[data-code-block="true"]')) {
+    const lines = box.querySelectorAll('.cm-content .cm-line');
+    const source = lines.length
+      ? [...lines].map(line => line.textContent || '').join('\n')
+      : (box.querySelector('pre')?.textContent || '');
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.textContent = source;
+    pre.appendChild(code);
+    box.replaceWith(pre);
+  }
+
+  clone.querySelectorAll(
+    'button, input, textarea, select, svg, script, style, ' +
+    '[hidden], [aria-hidden="true"], [data-markdown-copy="exclude"], .sr-only'
+  ).forEach(el => el.remove());
+
+  // Remove framework layout wrappers but keep semantic HTML such as headings,
+  // paragraphs, links, lists and tables. DOMPurify strips attributes and events.
+  for (const el of [...clone.querySelectorAll('span, div')].reverse()) {
+    el.replaceWith(...el.childNodes);
+  }
+
+  return DOMPurify.sanitize(clone.innerHTML, {
+    ALLOWED_TAGS: [
+      'p', 'br', 'strong', 'em', 'b', 'i', 'code', 'pre', 'h1', 'h2', 'h3',
+      'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'table', 'thead',
+      'tbody', 'tr', 'th', 'td', 'hr', 'a', 'img', 'del', 'sup', 'sub'
+    ],
+    ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'colspan', 'rowspan'],
+    ALLOW_DATA_ATTR: false
+  }).trim();
+}
+
+function saveEmergencyFrontendSnapshot() {
+  const root = document.querySelector('main') || document.body;
+  const snapshot = {
+    exportMethod: 'emergency-frontend-snapshot',
+    capturedAt: new Date().toISOString(),
+    conversationId: getConversationId(),
+    url: location.href,
+    title: document.title,
+    warning: 'Only browser-mounted messages; virtualized older messages are absent.',
+    messages: captureEmergencyFrontendMessages(),
+    // Full raw DOM for maximum recoverability if the structured extractor
+    // misses a new UI format. No API token or backend request is involved.
+    visibleText: root.innerText,
+    visibleHTML: root.outerHTML
+  };
+  const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
+    type: 'application/json'
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `llm-emergency-${Date.now()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+function emergencyComparableText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function mergeEmergencyFrontendMessages(backend, snapshot) {
+  if (!Array.isArray(snapshot) || !snapshot.length) return backend;
+  const merged = backend.slice();
+  let insertAfter = -1;
+  let recovered = 0;
+  for (const frontend of snapshot) {
+    const comparable = emergencyComparableText(frontend.text);
+    if (!comparable) continue;
+
+    // Prefer stable message IDs; a text fallback handles older API versions.
+    const existing = merged.findIndex(msg =>
+      (msg.id && msg.id === frontend.id) ||
+      (msg.role === frontend.role &&
+        emergencyComparableText(msg.segments
+          .filter(s => s.type === 'text')
+          .map(s => s.content).join(' ')) === comparable)
+    );
+    if (existing >= 0) {
+      insertAfter = existing;
+      continue;
+    }
+
+    // IMPORTANT: don't insert unanchored DOM turns at the end of a much longer
+    // backend conversation. A known predecessor prevents duplicate/out-of-order
+    // messages if only a virtualized fragment is mounted.
+    if (insertAfter < 0) continue;
+    merged.splice(++insertAfter, 0, {
+      id: frontend.id,
+      role: frontend.role,
+      segments: [{ type: 'frontend', content: frontend.text, html: frontend.html }],
+      citeMap: {},
+      origin: 'frontend'
+    });
+    recovered++;
+  }
+  if (recovered) {
+    console.info(`[LLM Export] Recovered ${recovered} UI-only messages from the browser.`);
+  }
+  return merged;
+}
 
 function getAccessToken() {
   try {
@@ -155,7 +328,7 @@ function linearize(mapping, includeImages, currentNode) {
           // carry their filename/title directly on the reference object.
           citeMap[ref.matched_text] = ref.items?.length ? ref.items : [ref];
         }
-        messages.push({ role: displayRole, segments, citeMap });
+        messages.push({ id: msg.id || node.id, role: displayRole, segments, citeMap });
       }
     }
     const validChildren = (node.children ?? []).filter(cid => cid in mapping);
@@ -219,11 +392,65 @@ function linearizePaginated(rawMessages, includeImages) {
       role,
       segments,
       citeMap,
-      kind: contentType === 'thoughts' ? 'reasoning' : undefined
+      kind: contentType === 'thoughts' ? 'reasoning' : undefined,
+      id: msg.id
     });
   }
 
   return messages;
+}
+
+function parseSelectedTextRequest(raw) {
+  if (typeof raw !== 'string') return null;
+  const lines = raw.replace(/\r\n?/g, '\n').trimStart().split('\n');
+  if (!/^\s*#{1,6}\s*Selected text:\s*$/i.test(lines[0])) return null;
+
+  const selections = [];
+  let current = null;
+  let requestStarted = false;
+  const requestLines = [];
+
+  for (const line of lines.slice(1)) {
+    if (!requestStarted) {
+      const selected = line.match(/^\s*#{1,6}\s*Selection\s+(\d+)\s*$/i);
+      if (selected) {
+        current = { number: Number(selected[1]), lines: [] };
+        selections.push(current);
+        continue;
+      }
+      if (/^\s*#{1,6}\s*My request:\s*$/i.test(line) && selections.length) {
+        requestStarted = true;
+        continue;
+      }
+    }
+
+    if (requestStarted) {
+      requestLines.push(line);
+    } else if (current) {
+      current.lines.push(line);
+    } else if (line.trim()) {
+      // Some unexpected text before Selection 1: don't guess its structure.
+      return null;
+    }
+  }
+
+  if (!requestStarted || !selections.length) return null;
+  const quotes = selections.map(item => ({
+    number: item.number,
+    text: item.lines.join('\n').trim()
+  }));
+  const request = requestLines.join('\n').trim();
+  if (!request || quotes.some(item => !item.text)) return null;
+  return { selections: quotes, request };
+}
+
+function renderSelectedTextCards(selection) {
+  const cards = selection.selections.map(item => `
+    <div class="selected-text-card">
+      <div class="selected-text-label">Auswahl ${item.number}</div>
+      <div class="selected-text-body">${renderMarkdown(item.text)}</div>
+    </div>`).join('');
+  return cards + `<div class="selected-text-request">${renderMarkdown(selection.request)}</div>`;
 }
 
 function mdResolveSpans(text, citeMap) {
@@ -262,7 +489,7 @@ function mdResolveSpans(text, citeMap) {
     .replace(/citeturn\d+\w*/g, '');
 }
 
-async function exportMarkdown(robust = false) {
+async function exportMarkdown(robust = false, frontendSnapshot = null) {
   const token = getAccessToken();
   const convId = getConversationId();
   if (!token || !convId) {
@@ -273,17 +500,33 @@ async function exportMarkdown(robust = false) {
   const result = robust
     ? await fetchConversationPaginated(convId, token, false)
     : await fetchConversation(convId, token, false);
-  const messages = robust
+  let messages = robust
     ? linearizePaginated(result.data.messages, false)
     : linearize(result.data.mapping, false, result.data.current_node);
+  messages = mergeEmergencyFrontendMessages(messages, frontendSnapshot);
   if (!messages.length) throw new Error('No messages found.');
 
   const label = { user: 'User', assistant: 'Assistant' };
   const md = messages
-    .map(({ role, segments, citeMap, kind }) => {
+    .map(({ role, segments, citeMap, kind, origin }) => {
+      const textSegments = segments.filter(s => s.type === 'text');
+      const selected = role === 'user' && textSegments.length === 1
+        ? parseSelectedTextRequest(textSegments[0].content)
+        : null;
+      if (selected) {
+        const quotes = selected.selections.map(item => {
+          const quote = mdResolveSpans(item.text, citeMap ?? {})
+            .split('\n')
+            .map(line => line ? `> ${line}` : '>')
+            .join('\n');
+          return `> **Auswahl ${item.number}**\n>\n${quote}`;
+        }).join('\n\n');
+        return `## User\n\n${quotes}\n\n${mdResolveSpans(selected.request, citeMap ?? {})}`;
+      }
+
       const text = segments
-        .filter(s => s.type === 'text')
-        .map(s => mdResolveSpans(s.content, citeMap ?? {}))
+        .filter(s => s.type === 'text' || s.type === 'frontend')
+        .map(s => s.type === 'frontend' ? s.content : mdResolveSpans(s.content, citeMap ?? {}))
         .join('\n\n');
 
       if (kind === 'reasoning') {
@@ -294,7 +537,8 @@ async function exportMarkdown(robust = false) {
         return `### Reasoning summary\n\n${quoted}`;
       }
 
-      return `## ${label[role] || role}\n\n${text}`;
+      const note = origin === 'frontend' ? '*Recovered from browser (UI-only)*\n\n' : '';
+      return `## ${label[role] || role}\n\n${note}${text}`;
     })
     .join('\n\n');
 
@@ -728,7 +972,7 @@ async function collectFromDOM(includeImages = false) {
   return messages;
 }
 
-async function convertToHTML(format = 'html', selectedTheme = 'auto', includeImages = false, latexSupport = false, askTitle = false, robust = false) {
+async function convertToHTML(format = 'html', selectedTheme = 'auto', includeImages = false, latexSupport = false, askTitle = false, robust = false, frontendSnapshot = null) {
   try {
     let mathJaxScript = '';
     if (latexSupport && format !== 'pdf') {
@@ -764,6 +1008,7 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
       messages = robust
         ? linearizePaginated(result.data.messages, includeImages)
         : linearize(result.data.mapping, includeImages, result.data.current_node);
+      messages = mergeEmergencyFrontendMessages(messages, frontendSnapshot);
     } else {
       if (robust) throw new Error('Robust export requires a signed-in ChatGPT session.');
       messages = await collectFromDOM(includeImages);
@@ -780,6 +1025,9 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
     const bg       = theme === 'dark' ? '#212121' : '#FFF';
     const fg       = theme === 'dark' ? '#FFF'    : '#000';
     const userBg   = theme === 'dark' ? '#303030' : '#f4f4f4';
+    const selectedBg = theme === 'dark' ? '#383838' : 'rgba(255,255,255,0.86)';
+    const selectedBorder = theme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.12)';
+    const selectedLabel = theme === 'dark' ? '#c9c9c9' : '#5f6267';
     const reasoningBg = theme === 'dark' ? 'rgba(16,163,127,0.14)' : '#eefaf6';
     const reasoningBorder = '#10a37f';
     const reasoningLabel = theme === 'dark' ? '#7de2c6' : '#08735a';
@@ -809,6 +1057,7 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
   <style>
     :root {
       --bg: ${bg}; --fg: ${fg}; --user-bg: ${userBg};
+      --selected-bg: ${selectedBg}; --selected-border: ${selectedBorder}; --selected-label: ${selectedLabel};
       --reasoning-bg: ${reasoningBg}; --reasoning-border: ${reasoningBorder}; --reasoning-label: ${reasoningLabel};
       --code-bg: ${codeBg}; --table-bdr: ${tableBdr};
       --bq-bdr: ${bqBdr}; --cb-bg: ${cbBg}; --cb-bdr: ${cbBorder};
@@ -838,7 +1087,25 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
     .conversation { max-width: 900px; margin: 0 auto; padding: 20px; }
     .message { margin-bottom: 20px; padding: 10px 20px; border-radius: 18px; width: fit-content; clear: both; overflow: hidden; }
     .user-message { float: right; max-width: 80%; background: var(--user-bg); }
+    .selected-text-card {
+      background: var(--selected-bg);
+      border: 1px solid var(--selected-border);
+      border-radius: 12px;
+      padding: 10px 14px;
+      margin-bottom: 12px;
+    }
+    .selected-text-label {
+      color: var(--selected-label);
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .selected-text-body > :first-child,
+    .selected-text-request > :first-child { margin-top: 0; }
+    .selected-text-body > :last-child,
+    .selected-text-request > :last-child { margin-bottom: 0; }
     .assistant-message { float: left; max-width: 95%; }
+    .emergency-source-label { font-size: 11px; color: #10a37f; font-weight: 600; margin-bottom: 6px; }
     .reasoning-message {
       float: left; max-width: 95%;
       background: var(--reasoning-bg);
@@ -983,7 +1250,7 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
 `;
 
     let userIdx = 0;
-    for (const { role, segments, citeMap, kind } of messages) {
+    for (const { role, segments, citeMap, kind, origin } of messages) {
       _citeMap = citeMap ?? {};
 
       const isUser = role === 'user';
@@ -993,8 +1260,13 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
         : (isReasoning ? 'reasoning-message' : 'assistant-message');
       let content = '';
       for (const seg of segments) {
-        if (seg.type === 'text') {
-          content += renderMarkdown(seg.content);
+        if (seg.type === 'frontend') {
+          content += seg.html || `<p>${esc(seg.content)}</p>`;
+        } else if (seg.type === 'text') {
+          const selection = isUser ? parseSelectedTextRequest(seg.content) : null;
+          content += selection
+            ? renderSelectedTextCards(selection)
+            : renderMarkdown(seg.content);
         } else if (seg.type === 'html') {
           content += seg.content;
         } else if (seg.type === 'image') {
@@ -1004,10 +1276,13 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
       }
 
       const idAttr = isUser ? ` id="user-msg-${userIdx++}"` : '';
+      const recoveryLabel = origin === 'frontend'
+        ? '<div class="emergency-source-label">Recovered from browser</div>'
+        : '';
       const reasoningHeader = isReasoning
         ? '<div class="reasoning-label">Reasoning summary</div>'
         : '';
-      html += `    <div class="message ${cls}"${idAttr}>${reasoningHeader}<div class="content" dir="auto">${content}</div></div>\n`;
+      html += `    <div class="message ${cls}"${idAttr}>${recoveryLabel}${reasoningHeader}<div class="content" dir="auto">${content}</div></div>\n`;
     }
 
     const viewerScript = format === 'pdf' ? '' : `  <script>

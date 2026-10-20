@@ -1,5 +1,6 @@
 const exportButton    = document.getElementById('convertBtn');
 const robustButton    = document.getElementById('robustBtn');
+const emergencyButton = document.getElementById('emergencyBtn');
 const formatSelect    = document.getElementById('formatSelect');
 const themeSelect     = document.getElementById('themeSelect');
 const includeImages   = document.getElementById('includeImages');
@@ -83,7 +84,7 @@ askTitle.addEventListener('change', () => {
 
 function ensureContentScript(tab, cb) {
   chrome.tabs.sendMessage(tab.id, { action: 'ping' }, (response) => {
-    if (chrome.runtime.lastError) {
+    if (chrome.runtime.lastError || !response?.emergencyFrontend) {
       chrome.tabs.executeScript(tab.id, { file: 'content/content.js' }, cb);
     } else {
       cb();
@@ -206,6 +207,21 @@ robustButton.addEventListener('click', () => {
       if (response?.status === 'print') {
         chrome.tabs.create({ url: chrome.runtime.getURL('print/print.html') });
       }
+    });
+  });
+});
+
+emergencyButton.addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs[0];
+    if (!tab) return;
+    ensureContentScript(tab, () => {
+      chrome.tabs.sendMessage(tab.id, { action: 'save_frontend_snapshot' }, (response) => {
+        if (chrome.runtime.lastError || response?.status === 'error') {
+          alert('Frontend snapshot failed: ' +
+            (response?.error || chrome.runtime.lastError?.message || 'Unknown error'));
+        }
+      });
     });
   });
 });

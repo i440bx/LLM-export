@@ -482,3 +482,21 @@ body.dark button#robustBtn:hover {
     background: rgba(16, 163, 127, 0.14);
   }
 }
+
+/* Emergency UI-only backup: intentionally independent of the backend. */
+button#emergencyBtn {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #f4f4f4;
+  color: #333;
+  border: 1px solid #dedede;
+  cursor: pointer;
+}
+button#emergencyBtn:hover { background: #e8e8e8; }
+body.dark button#emergencyBtn { background: #303030; color: #ddd; border-color: #4a4a4a; }
+body.dark button#emergencyBtn:hover { background: #3b3b3b; }

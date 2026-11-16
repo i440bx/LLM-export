@@ -12,8 +12,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const robust = request.action === 'convert_to_html_robust';
     // Capture synchronously, before a slow backend request or a DOM update.
     const frontendSnapshot = captureEmergencyFrontendMessages();
-    const run = request.format === 'markdown'
-      ? exportMarkdown(robust, frontendSnapshot)
+    const conversationLimitNotice = captureConversationLimitNotice();
+    const format = request.format || 'html';
+    showLLMExportTabStatus('running', format, robust);
+    const run = format === 'markdown'
+      ? exportMarkdown(robust, frontendSnapshot, conversationLimitNotice)
       : convertToHTML(
           request.format,
           request.theme,
@@ -21,17 +24,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           request.latexSupport,
           request.askTitle,
           robust,
-          frontendSnapshot
+          frontendSnapshot,
+          conversationLimitNotice
         );
-    run.then((result) => sendResponse({ status: result ?? 'done' }))
-      .catch((err) => sendResponse({ status: 'error', error: err?.message || String(err) }));
+    run.then((result) => {
+      showLLMExportTabStatus(result === 'print' ? 'print' : 'done', format, robust);
+      // The popup might already be closed; the export and the tab status
+      // still finish normally even if the response port has gone away.
+      try { sendResponse({ status: result ?? 'done' }); } catch (_) {}
+    }).catch((err) => {
+      showLLMExportTabStatus('error', format, robust);
+      try { sendResponse({ status: 'error', error: err?.message || String(err) }); } catch (_) {}
+    });
     return true;
   }
   if (request.action === 'save_frontend_snapshot') {
     try {
       saveEmergencyFrontendSnapshot();
+      showLLMExportTabStatus('snapshot', 'json', false);
       sendResponse({ status: 'done' });
     } catch (err) {
+      showLLMExportTabStatus('error', 'json', false);
       sendResponse({ status: 'error', error: err?.message || String(err) });
     }
     return;
@@ -42,9 +55,90 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
+// A browser-action popup closes on tab changes in Firefox. Keep export state
+// in the chat tab itself. This element lives outside <main>, so the emergency
+// DOM snapshot never mistakes it for part of the conversation.
+let llmExportStatusTimeout = null;
+let llmExportStatusRevision = 0;
+function showLLMExportTabStatus(state, format = 'html', robust = false) {
+  const language = (document.documentElement.lang || navigator.language || 'en')
+    .toLowerCase().split('-')[0];
+  const translations = {
+    de: { running: 'Export läuft …', done: 'Export fertig – Download gestartet',
+          print: 'PDF vorbereitet – Druckdialog öffnen', error: 'Export fehlgeschlagen',
+          snapshot: 'Snapshot-Download gestartet' },
+    en: { running: 'Export running …', done: 'Export finished – download started',
+          print: 'PDF prepared – open print dialog', error: 'Export failed',
+          snapshot: 'Snapshot download started' },
+    fr: { running: 'Exportation en cours …', done: 'Export terminé – téléchargement lancé',
+          print: 'PDF prêt – ouvrir la fenêtre d’impression', error: 'Échec de l’export',
+          snapshot: 'Téléchargement de l’instantané lancé' },
+    hi: { running: 'निर्यात जारी है …', done: 'निर्यात पूरा – डाउनलोड शुरू',
+          print: 'PDF तैयार – प्रिंट विंडो खोलें', error: 'निर्यात विफल',
+          snapshot: 'स्नैपशॉट डाउनलोड शुरू' }
+  };
+  const wording = translations[language] || translations.en;
+  let toast = document.getElementById('llm-export-status-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'llm-export-status-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    toast.style.cssText = [
+      'position:fixed', 'left:20px', 'bottom:20px', 'z-index:2147483647',
+      'max-width:min(420px,calc(100vw - 40px))', 'padding:10px 14px',
+      'border-radius:10px', 'border:1px solid rgba(255,255,255,.18)',
+      'background:#232323', 'color:#fff',
+      'font:500 13px/1.5 system-ui,sans-serif',
+      'box-shadow:0 5px 22px rgba(0,0,0,.25)',
+      'pointer-events:none', 'white-space:normal'
+    ].join(';');
+    document.body.appendChild(toast);
+  }
+  const label = robust ? 'Robust' : format.toUpperCase();
+  toast.textContent = `LLM Export · ${label}: ${wording[state] || wording.error}`;
+  toast.style.borderLeft = state === 'error' ? '4px solid #f87171' :
+    state === 'running' ? '4px solid #fbbf24' : '4px solid #10a37f';
+  clearTimeout(llmExportStatusTimeout);
+  const revision = ++llmExportStatusRevision;
+  if (state !== 'running') {
+    llmExportStatusTimeout = setTimeout(() => {
+      if (revision === llmExportStatusRevision) toast.remove();
+    }, state === 'error' ? 25000 : 12000);
+  }
+}
+
 // Emergency frontend recovery (2026): UI-only messages can be missing from
 // both conversation API endpoints. Capture only currently mounted DOM turns.
 // ChatGPT virtualizes old turns; this is NOT a complete conversation export.
+// A conversation-level warning is a UI status, not a backend message.
+// Match its placement/structure instead of German/English wording: the
+// extracted text therefore remains in the user's original UI language.
+// Exclude alerts embedded in chat messages or unrelated global UI banners.
+function captureConversationLimitNotice() {
+  for (const alert of document.querySelectorAll('main aside[role="alert"]')) {
+    if (!alert.closest('.thread-scroll-container, [data-chatgpt-conversation-selection-target]')) {
+      continue;
+    }
+    if (alert.closest('[data-chatgpt-search-message-ids], [data-user-message-bubble="true"]')) {
+      continue;
+    }
+    // The tested length-limit card is a danger-styled conversation banner
+    // with an action button. Neither criterion depends on the UI language.
+    const classes = String(alert.className || '');
+    if (!alert.querySelector('button') || !/text-danger|border-text-danger/.test(classes)) {
+      continue;
+    }
+
+    const clone = alert.cloneNode(true);
+    clone.querySelectorAll('button, [aria-hidden="true"], svg, script, style')
+      .forEach(el => el.remove());
+    const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text) return text;
+  }
+  return null;
+}
+
 function captureEmergencyFrontendMessages() {
   const result = [];
   const seen = new Set();
@@ -140,6 +234,7 @@ function saveEmergencyFrontendSnapshot() {
     title: document.title,
     warning: 'Only browser-mounted messages; virtualized older messages are absent.',
     messages: captureEmergencyFrontendMessages(),
+    conversationLimitNotice: captureConversationLimitNotice(),
     // Full raw DOM for maximum recoverability if the structured extractor
     // misses a new UI format. No API token or backend request is involved.
     visibleText: root.innerText,
@@ -489,7 +584,7 @@ function mdResolveSpans(text, citeMap) {
     .replace(/citeturn\d+\w*/g, '');
 }
 
-async function exportMarkdown(robust = false, frontendSnapshot = null) {
+async function exportMarkdown(robust = false, frontendSnapshot = null, conversationLimitNotice = null) {
   const token = getAccessToken();
   const convId = getConversationId();
   if (!token || !convId) {
@@ -507,7 +602,7 @@ async function exportMarkdown(robust = false, frontendSnapshot = null) {
   if (!messages.length) throw new Error('No messages found.');
 
   const label = { user: 'User', assistant: 'Assistant' };
-  const md = messages
+  let md = messages
     .map(({ role, segments, citeMap, kind, origin }) => {
       const textSegments = segments.filter(s => s.type === 'text');
       const selected = role === 'user' && textSegments.length === 1
@@ -541,6 +636,14 @@ async function exportMarkdown(robust = false, frontendSnapshot = null) {
       return `## ${label[role] || role}\n\n${note}${text}`;
     })
     .join('\n\n');
+
+  if (conversationLimitNotice) {
+    const quotedNotice = conversationLimitNotice
+      .split('\n')
+      .map(line => `> ${line}`)
+      .join('\n');
+    md += `\n\n---\n\n> **ChatGPT**\n>\n${quotedNotice}`;
+  }
 
   const blob = new Blob([md], { type: 'text/markdown' });
   const url = URL.createObjectURL(blob);
@@ -914,7 +1017,7 @@ async function extractTurn(turn, includeImages = false) {
   clone.querySelectorAll('pre').forEach((pre, i) => {
     const cb = codeBlocks[i];
     if (!cb) return;
-    pre.innerHTML = '';
+    pre.replaceChildren();
     pre.textContent = cb.rawCode;
     pre.className = cb.language ? `language-${cb.language}` : '';
   });
@@ -927,11 +1030,12 @@ async function extractTurn(turn, includeImages = false) {
   });
 
   const tmp = document.createElement('div');
-  tmp.innerHTML = DOMPurify.sanitize(isNewFormat ? clone.outerHTML : clone.innerHTML, {
+  tmp.appendChild(DOMPurify.sanitize(isNewFormat ? clone.outerHTML : clone.innerHTML, {
     ALLOWED_TAGS: ['div','p','code','pre','h1','h2','h3','h4','h5','h6','ul','ol','li','strong','em','blockquote','table','thead','tbody','tr','td','th','hr','span','br', ...(includeImages ? ['img'] : [])],
     ALLOWED_ATTR: keepAttrs,
-    ALLOW_DATA_ATTR: false
-  });
+    ALLOW_DATA_ATTR: false,
+    RETURN_DOM_FRAGMENT: true
+  }));
 
   tmp.querySelectorAll('pre').forEach(pre => {
     const langClass = Array.from(pre.classList).find(c => c.startsWith('language-'));
@@ -951,7 +1055,12 @@ async function extractTurn(turn, includeImages = false) {
     langSpan.className = 'code-lang';
     langSpan.textContent = language || 'plaintext';
     header.appendChild(langSpan);
-    pre.innerHTML = result.value;
+    pre.replaceChildren(DOMPurify.sanitize(result.value, {
+      RETURN_DOM_FRAGMENT: true,
+      ALLOWED_TAGS: ['span', 'br'],
+      ALLOWED_ATTR: ['class'],
+      ALLOW_DATA_ATTR: false
+    }));
     pre.className = 'code-block hljs';
     pre.parentNode.insertBefore(wrapper, pre);
     wrapper.appendChild(header);
@@ -972,7 +1081,7 @@ async function collectFromDOM(includeImages = false) {
   return messages;
 }
 
-async function convertToHTML(format = 'html', selectedTheme = 'auto', includeImages = false, latexSupport = false, askTitle = false, robust = false, frontendSnapshot = null) {
+async function convertToHTML(format = 'html', selectedTheme = 'auto', includeImages = false, latexSupport = false, askTitle = false, robust = false, frontendSnapshot = null, conversationLimitNotice = null) {
   try {
     let mathJaxScript = '';
     if (latexSupport && format !== 'pdf') {
@@ -1031,6 +1140,9 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
     const reasoningBg = theme === 'dark' ? 'rgba(16,163,127,0.14)' : '#eefaf6';
     const reasoningBorder = '#10a37f';
     const reasoningLabel = theme === 'dark' ? '#7de2c6' : '#08735a';
+    const limitBg = theme === 'dark' ? 'rgba(127,29,29,0.18)' : '#fff7f7';
+    const limitBorder = theme === 'dark' ? 'rgba(252,165,165,0.45)' : '#fecaca';
+    const limitFg = theme === 'dark' ? '#fca5a5' : '#e03131';
     const codeBg   = theme === 'dark' ? '#303030' : '#ececec';
     const tableBdr = theme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)';
     const bqBdr    = theme === 'dark' ? 'rgba(255,255,255,0.3)'  : 'rgba(0,0,0,0.2)';
@@ -1059,6 +1171,7 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
       --bg: ${bg}; --fg: ${fg}; --user-bg: ${userBg};
       --selected-bg: ${selectedBg}; --selected-border: ${selectedBorder}; --selected-label: ${selectedLabel};
       --reasoning-bg: ${reasoningBg}; --reasoning-border: ${reasoningBorder}; --reasoning-label: ${reasoningLabel};
+      --limit-bg: ${limitBg}; --limit-border: ${limitBorder}; --limit-fg: ${limitFg};
       --code-bg: ${codeBg}; --table-bdr: ${tableBdr};
       --bq-bdr: ${bqBdr}; --cb-bg: ${cbBg}; --cb-bdr: ${cbBorder};
       --nav-dash: ${navDash}; --nav-dash-hov: ${navDashHov}; --nav-dash-act: ${navDashAct};
@@ -1120,6 +1233,21 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
       text-transform: uppercase;
       margin-bottom: 6px;
     }
+    .conversation-limit-alert {
+      clear: both;
+      background: var(--limit-bg);
+      border: 1px solid var(--limit-border);
+      color: var(--limit-fg);
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 16px 0 20px;
+      break-inside: avoid;
+      page-break-inside: avoid;
+      overflow-wrap: break-word;
+    }
+    .conversation-limit-title { font-weight: 700; margin-bottom: 4px; }
     .content { user-select: text; overflow-wrap: break-word; }
     .content img { max-height: 220px; width: auto; border-radius: 8px; margin: 8px 0; display: block; cursor: zoom-in; transition: opacity 0.15s; }
     .content img:hover { opacity: 0.85; }
@@ -1285,6 +1413,13 @@ async function convertToHTML(format = 'html', selectedTheme = 'auto', includeIma
       html += `    <div class="message ${cls}"${idAttr}>${recoveryLabel}${reasoningHeader}<div class="content" dir="auto">${content}</div></div>\n`;
     }
 
+    // Status appears *after* the last message, never as a made-up chat turn.
+    // The original "start a new chat" button is intentionally not exported:
+    // it cannot work in a standalone HTML/PDF document.
+    if (conversationLimitNotice) {
+      html += `    <aside class="conversation-limit-alert" role="note"><div>${esc(conversationLimitNotice)}</div></aside>\n`;
+    }
+
     const viewerScript = format === 'pdf' ? '' : `  <script>
     const lb = document.getElementById('lb');
     const lbImg = document.getElementById('lb-img');
@@ -1389,6 +1524,9 @@ ${viewerScript}</body>
 
   } catch (error) {
     console.error('Export error:', error);
-    alert('Export failed: ' + error.message);
+    // Preserve the legacy alert for the normal export. Robust export gets its
+    // error in the popup (if open) and always in the persistent tab status.
+    if (!robust) alert('Export failed: ' + error.message);
+    throw error;
   }
 }
